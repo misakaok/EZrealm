@@ -3,9 +3,9 @@
 # ========================================
 # 全局配置
 # ========================================
-CURRENT_VERSION="1.1.1"
-UPDATE_URL="https://raw.githubusercontent.com/qqrrooty/EZrealm/main/realm.sh"
-VERSION_CHECK_URL="https://raw.githubusercontent.com/qqrrooty/EZrealm/main/version.txt"
+CURRENT_VERSION="1.1.2"
+UPDATE_URL="https://raw.githubusercontent.com/misakaok/EZrealm/main/realm.sh"
+VERSION_CHECK_URL="https://raw.githubusercontent.com/misakaok/EZrealm/main/version.txt"
 REALM_DIR="/root/realm"
 CONFIG_FILE="$REALM_DIR/config.toml"
 SERVICE_FILE="/etc/systemd/system/realm.service"
@@ -159,50 +159,58 @@ perform_update() {
 # ========================================
 # 核心功能模块
 # ========================================
-deploy_realm() {
+deploy_realm() (
     log "开始安装Realm"
     echo -e "${BLUE}▶ 正在安装Realm...${NC}"
-    
-    mkdir -p "$REALM_DIR"
-    cd "$REALM_DIR" || exit 1
+    mkdir -p "$REALM_DIR" || return 1
 
-    # 获取最新版本号
+    # musl 静态构建不依赖宿主 GLIBC，避免 Debian 12 上 GLIBC_2.38 缺失。
+    local arch stage
+    case "$(uname -m)" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *)
+            echo -e "${RED}✖ 暂不支持此架构: $(uname -m)${NC}"
+            return 1
+            ;;
+    esac
+
     echo -e "${BLUE}▶ 正在检测最新版本...${NC}"
-    LATEST_VERSION=$(curl -sL https://github.com/zhboner/realm/releases | grep -oE '/zhboner/realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d'/' -f6 | tr -d 'v')
-    
-    # 版本号验证
-    if [[ -z "$LATEST_VERSION" || ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        log "版本检测失败，使用备用版本2.7.0"
-        LATEST_VERSION="2.7.0"
+    LATEST_VERSION=$(curl -fsSL --connect-timeout 10 --max-time 30 "https://api.github.com/repos/zhboner/realm/releases/latest" | sed -n 's/.*"tag_name": *"v\([0-9][0-9.]*\)".*/\1/p' | head -n1)
+    if [[ ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        LATEST_VERSION="2.9.6"
+        log "版本检测失败，使用已确认提供 musl 构建的备用版本 $LATEST_VERSION"
         echo -e "${YELLOW}⚠ 无法获取最新版本，使用备用版本 v${LATEST_VERSION}${NC}"
-    else
-        echo -e "${GREEN}✓ 检测到最新版本 v${LATEST_VERSION}${NC}"
     fi
 
-    # 下载最新版本
-    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/v${LATEST_VERSION}/realm-x86_64-unknown-linux-gnu.tar.gz"
-    echo -e "${BLUE}▶ 正在下载 Realm v${LATEST_VERSION}...${NC}"
-    if ! wget --show-progress -qO realm.tar.gz "$DOWNLOAD_URL"; then
-        log "安装失败：下载错误"
-        echo -e "${RED}✖ 文件下载失败，请检查：${NC}"
-        echo -e "1. 网络连接状态"
-        echo -e "2. GitHub访问权限"
-        echo -e "3. 手动验证下载地址: $DOWNLOAD_URL"
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/v${LATEST_VERSION}/realm-${arch}-unknown-linux-musl.tar.gz"
+    stage=$(mktemp -d "$REALM_DIR/.install.XXXXXX") || return 1
+    trap 'rm -rf "$stage"' EXIT
+    echo -e "${BLUE}▶ 正在下载 Realm v${LATEST_VERSION} ($arch, musl)...${NC}"
+    if ! curl -fL --connect-timeout 10 --max-time 300 --retry 3 "$DOWNLOAD_URL" -o "$stage/realm.tar.gz"; then
+        log "安装失败：下载错误 $DOWNLOAD_URL"
+        echo -e "${RED}✖ 下载失败，现有程序和配置未修改: $DOWNLOAD_URL${NC}"
         return 1
     fi
 
-    # 解压安装
-    tar -xzf realm.tar.gz
-    chmod +x realm
-    rm realm.tar.gz
+    # 在临时目录中解压并实际运行，验证兼容性后才替换现有程序。
+    if ! tar -xzf "$stage/realm.tar.gz" -C "$stage" ||
+       ! chmod +x "$stage/realm" ||
+       ! "$stage/realm" --version; then
+        log "安装失败：解压或程序运行验证失败"
+        echo -e "${RED}✖ 程序验证失败，现有程序和配置未修改${NC}"
+        return 1
+    fi
+    if [[ -f "$REALM_DIR/realm" ]]; then
+        cp -p "$REALM_DIR/realm" "$REALM_DIR/realm.bak" || return 1
+    fi
+    # 同一文件系统内重命名，允许替换仍在运行的旧程序。
+    mv -f "$stage/realm" "$REALM_DIR/realm" || return 1
 
-    # 初始化配置文件
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "[network]\nno_tcp = false\nuse_udp = true" > "$CONFIG_FILE"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        printf '[network]\nno_tcp = false\nuse_udp = true\n' > "$CONFIG_FILE" || return 1
     fi
 
-    # 创建服务文件
-    echo -e "${BLUE}▶ 创建系统服务...${NC}"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Realm Proxy Service
@@ -217,11 +225,11 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    systemctl daemon-reload
-    log "安装成功"
-    echo -e "${GREEN}✔ 安装完成！${NC}"
-}
+    [[ $? -eq 0 ]] || return 1
+    systemctl daemon-reload || return 1
+    log "安装成功：Realm v$LATEST_VERSION ($arch, musl)"
+    echo -e "${GREEN}✔ 安装完成！请选择启动/重启服务以使用新程序。${NC}"
+)
 
 # 查看转发规则
 show_rules() {
@@ -310,7 +318,7 @@ add_rule() {
         esac
 
         # 写入配置文件（关键修正点）
-        sudo tee -a "$CONFIG_FILE" > /dev/null <<EOF
+        tee -a "$CONFIG_FILE" > /dev/null <<EOF
 
 [[endpoints]]
 # 备注: $remark 
@@ -326,7 +334,7 @@ EOF
         fi
 
         # 重启服务
-        sudo systemctl restart realm.service
+        systemctl restart realm.service
         log "规则已添加: $listen_addr → $remote_ip:$remote_port"
         echo -e "${GREEN}✔ 添加成功！${NC}"
         
@@ -409,31 +417,29 @@ delete_rule() {
   echo "转发规则及其备注已删除。"
 
   # 重启服务
-  sudo systemctl restart realm.service
+  systemctl restart realm.service
 }
 
 service_control() {
     case $1 in
-        start)
-            sudo systemctl unmask realm.service
-            sudo systemctl daemon-reload
-            sudo systemctl restart realm.service
-            sudo systemctl enable realm.service
-            log "启动服务"
+        start|restart)
+            if ! systemctl unmask realm.service ||
+               ! systemctl daemon-reload ||
+               ! systemctl reset-failed realm.service ||
+               ! systemctl restart realm.service ||
+               ! systemctl enable realm.service ||
+               ! systemctl is-active --quiet realm.service; then
+                log "服务启动失败"
+                echo -e "${RED}✖ 服务启动失败，请运行 journalctl -u realm.service -n 60 --no-pager 查看原因${NC}"
+                return 1
+            fi
+            log "启动/重启服务"
             echo -e "${GREEN}✔ 服务已启动${NC}"
             ;;
         stop)
-            sudo systemctl stop realm
+            systemctl stop realm || return 1
             log "停止服务"
             echo -e "${YELLOW}⚠ 服务已停止${NC}"
-            ;;
-        restart)
-            sudo systemctl unmask realm.service
-            sudo systemctl daemon-reload
-            sudo systemctl restart realm.service
-            sudo systemctl enable realm.service
-            log "重启服务"
-            echo -e "${GREEN}✔ 服务已重启${NC}"
             ;;
         status)
             if systemctl is-active --quiet realm; then
@@ -536,11 +542,11 @@ main_menu() {
         echo -e "    (1)安装前请先更新系统软件包，缺少命令可能无法安装"
         echo -e "    (2)如果启动失败请检查 /root/realm/config.toml下有无多余配置或者卸载后重新配置"
         echo -e "    (3)该脚本只在debian系统下测试，未做其他系统适配，安装命令有别，可能无法启动。如若遇到问题，请自行解决"
-        echo -e "    仓库：https://github.com/qqrrooty/EZrealm"
+        echo -e "    仓库：https://github.com/misakaok/EZrealm"
         echo -e "    2025/4/1 更新：有人反馈该新版本添加规则过多后无法启动，如果遇到问题，可以尝试回退老版本（大概率是备注问题）"
         echo -e "        删除该脚本 rm realm.sh"
-        echo -e "        运行 wget -N https://raw.githubusercontent.com/qqrrooty/EZrealm/main/realm-2024.sh && chmod +x realm.sh && ./realm.sh"
-        echo -e "        或者 wget -N https://raw.githubusercontent.com/qqrrooty/EZrealm/main/realm-2025.sh && chmod +x realm.sh && ./realm.sh${NC}"
+        echo -e "        运行 wget -N https://raw.githubusercontent.com/misakaok/EZrealm/main/realm-2024.sh && chmod +x realm.sh && ./realm.sh"
+        echo -e "        或者 wget -N https://raw.githubusercontent.com/misakaok/EZrealm/main/realm-2025.sh && chmod +x realm.sh && ./realm.sh${NC}"
         echo -e "${YELLOW}▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂﹍▂${NC}"
         echo -e "  "
         echo -e "${YELLOW}服务状态：$(service_control status)${NC}"
@@ -600,4 +606,6 @@ main_menu() {
 # ========================================
 # 脚本入口
 # ========================================
-main_menu "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main_menu "$@"
+fi
