@@ -3,7 +3,7 @@
 # ========================================
 # 全局配置
 # ========================================
-CURRENT_VERSION="1.1.2"
+CURRENT_VERSION="1.1.3"
 UPDATE_URL="https://ghfast.top/https://raw.githubusercontent.com/misakaok/EZrealm/main/CN/realm.sh"
 VERSION_CHECK_URL="https://ghfast.top/https://raw.githubusercontent.com/misakaok/EZrealm/main/version.txt"
 REALM_DIR="/root/realm"
@@ -159,6 +159,23 @@ perform_update() {
 # ========================================
 # 核心功能模块
 # ========================================
+write_service_file() {
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Realm Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$REALM_DIR/realm -c $CONFIG_FILE
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 deploy_realm() (
     log "开始安装Realm"
     echo -e "${BLUE}▶ 正在安装Realm...${NC}"
@@ -211,21 +228,7 @@ deploy_realm() (
         printf '[network]\nno_tcp = false\nuse_udp = true\n' > "$CONFIG_FILE" || return 1
     fi
 
-    cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=Realm Proxy Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=$REALM_DIR/realm -c $CONFIG_FILE
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    [[ $? -eq 0 ]] || return 1
+    write_service_file || return 1
     systemctl daemon-reload || return 1
     log "安装成功：Realm v$LATEST_VERSION ($arch, musl)"
     echo -e "${GREEN}✔ 安装完成！请选择启动/重启服务以使用新程序。${NC}"
@@ -423,14 +426,40 @@ delete_rule() {
 service_control() {
     case $1 in
         start|restart)
-            if ! systemctl unmask realm.service ||
-               ! systemctl daemon-reload ||
-               ! systemctl reset-failed realm.service ||
-               ! systemctl restart realm.service ||
-               ! systemctl enable realm.service ||
-               ! systemctl is-active --quiet realm.service; then
+            if [[ ! -x "$REALM_DIR/realm" || ! -f "$CONFIG_FILE" ]]; then
+                echo -e "${RED}✖ 未找到 Realm 程序或配置，请先选择菜单 1 安装/更新 Realm${NC}"
+                log "启动失败：Realm 程序或配置不存在"
+                return 1
+            fi
+            if ! systemctl unmask realm.service; then
+                echo -e "${RED}✖ 无法解除服务屏蔽，请检查 systemd 状态${NC}"
+                return 1
+            fi
+            if [[ ! -f "$SERVICE_FILE" ]]; then
+                echo -e "${YELLOW}▶ 服务文件不存在，正在重建...${NC}"
+                if ! write_service_file; then
+                    echo -e "${RED}✖ 无法创建服务文件 $SERVICE_FILE${NC}"
+                    return 1
+                fi
+            fi
+            if ! systemctl daemon-reload; then
+                echo -e "${RED}✖ 无法重新加载 systemd 服务${NC}"
+                return 1
+            fi
+
+            # 新服务或已被 systemd 回收的服务可能尚未加载；这时没有失败状态需要重置。
+            # 即使重置失败，也继续尝试启动，让 systemd 给出实际启动错误。
+            if ! systemctl reset-failed realm.service 2>/dev/null; then
+                log "无法重置服务失败状态，继续尝试启动"
+            fi
+            if ! systemctl restart realm.service || ! systemctl is-active --quiet realm.service; then
                 log "服务启动失败"
                 echo -e "${RED}✖ 服务启动失败，请运行 journalctl -u realm.service -n 60 --no-pager 查看原因${NC}"
+                return 1
+            fi
+            if ! systemctl enable realm.service; then
+                log "服务已启动，但设置开机启动失败"
+                echo -e "${YELLOW}⚠ 服务已启动，但设置开机启动失败${NC}"
                 return 1
             fi
             log "启动/重启服务"
