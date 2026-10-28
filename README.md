@@ -2,7 +2,7 @@
 
 本仓库 fork 自 [qqrrooty/EZrealm](https://github.com/qqrrooty/EZrealm)，更早来源为 [Jaydooooooo/Port-forwarding](https://github.com/Jaydooooooo/Port-forwarding)。
 
-## GLIBC 兼容修复（v1.1.2）
+## 兼容性和服务启动修复（v1.1.3）
 
 原安装器下载 `realm-x86_64-unknown-linux-gnu.tar.gz`。部分上游 GNU 构建要求 GLIBC 2.38，在 Debian 12 等系统会报 `GLIBC_2.38 not found`。
 
@@ -12,7 +12,8 @@
 - 下载、解压或程序验证失败时保留现有安装；已有 `config.toml` 不会被覆盖。
 - 替换前将旧程序备份为 `/root/realm/realm.bak`（下一次成功安装会更新此备份）。
 - 获取最新版本失败时使用已确认提供 musl 包的 v2.9.6。
-- 启动/重启前清除 systemd 失败次数限制；命令失败时不再显示启动成功。
+- 启动/重启前尝试清除 systemd 失败次数限制；如果服务尚未加载，仍继续尝试启动。
+- 现有程序和配置完整但 systemd 服务文件缺失时，启动操作会重建服务文件；已有服务文件不会被覆盖。
 - 移除当前安装器对 `sudo` 的依赖，仍须使用 root 运行。
 - 自动更新指向本 fork；国内脚本保持使用国内下载入口。
 
