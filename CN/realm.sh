@@ -3,7 +3,7 @@
 # ========================================
 # 全局配置
 # ========================================
-CURRENT_VERSION="1.1.3"
+CURRENT_VERSION="1.1.4"
 UPDATE_URL="https://ghfast.top/https://raw.githubusercontent.com/misakaok/EZrealm/main/CN/realm.sh"
 VERSION_CHECK_URL="https://ghfast.top/https://raw.githubusercontent.com/misakaok/EZrealm/main/version.txt"
 REALM_DIR="/root/realm"
